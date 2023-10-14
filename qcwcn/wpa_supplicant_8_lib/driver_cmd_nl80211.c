@@ -164,6 +164,9 @@
 #define AP_AC_VALUE_STR_LEN             strlen(AP_AC_VALUE_STR)
 #define MAC_ADDR_STR_LEN             	strlen(MAC_ADDRESS_STR)
 
+// Module defined MAC ADDR macros to print full mac address.
+// This is in order to remove dependency from MAC2STR definitions
+// in common.h from wpa_supplicant.
 #define MAC_ADDR_STR "%02x:%02x:%02x:%02x:%02x:%02x"
 #define MAC_ADDR_ARRAY(a) (a)[0], (a)[1], (a)[2], (a)[3], (a)[4], (a)[5]
 
@@ -1221,7 +1224,6 @@ static void parse_ext_ie(const u8 *ie, int ie_len)
 	}
 
 	ext_id = *ie++;
-	ie_len--;
 
 	switch (ext_id) {
 	case WLAN_EID_EXT_HE_CAPABILITIES:
@@ -2681,7 +2683,6 @@ static int check_for_twt_cmd(char **cmd)
 		*cmd += (TWT_SET_PARAM_STR_LEN + 1);
 		return QCA_WLAN_TWT_SET_PARAM;
 	} else {
-		wpa_printf(MSG_DEBUG, "Not a TWT command");
 		return TWT_CMD_NOT_EXIST;
 	}
 }
@@ -3029,7 +3030,6 @@ int process_twt_setup_cmd_string(char *cmd,
 					get_u32_from_string(cmd, &ret);
 		if (ret < 0)
 			return ret;
-		cmd = move_to_next_str(cmd);
 	}
 
 	print_setup_cmd_values(twt_setup_params);
@@ -5252,7 +5252,6 @@ static int wpa_driver_form_clear_mcc_quota_msg(struct i802_bss *bss,
 			return -EINVAL;
 		}
 		wpa_printf(MSG_INFO, "mcc_quota: ifindex %u", if_index);
-		cmd += strlen(iface) + 1;
 	}
 
 	nlmsg = prepare_vendor_nlmsg(drv, bss->ifname,
@@ -6349,6 +6348,58 @@ nlmsg_fail:
 	return ret;
 }
 
+static int wpa_driver_set_ul_mu_cfg(struct i802_bss *bss, char *cmd)
+{
+	struct wpa_driver_nl80211_data *drv = bss->drv;
+	struct nlattr *attr;
+	struct nl_msg *nlmsg = NULL;
+	int ret = 0;
+	u8 ulmu;
+	enum qca_ul_mu_config val;
+
+	ulmu = get_u8_from_string(cmd, &ret);
+	if (ret || ulmu > 1) {
+		wpa_printf(MSG_ERROR, "set_ul_mu_cfg: input error");
+		return -EINVAL;
+	}
+
+	if (ulmu)
+		val = QCA_UL_MU_ENABLE;
+	else
+		val = QCA_UL_MU_SUSPEND;
+
+	nlmsg =
+	prepare_vendor_nlmsg(drv, bss->ifname,
+			     QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION);
+	if (!nlmsg) {
+		wpa_printf(MSG_ERROR, "set_ul_mu_cfg: Failed to alloc nl msg");
+		return -ENOMEM;
+	}
+
+	attr = nla_nest_start(nlmsg, NL80211_ATTR_VENDOR_DATA);
+	if (!attr) {
+		wpa_printf(MSG_ERROR, "set_ul_mu_config: Failed to alloc attr");
+		ret = -ENOMEM;
+		goto fail;
+	}
+
+	ret = nla_put_u8(nlmsg, QCA_WLAN_VENDOR_ATTR_CONFIG_UL_MU_CONFIG, val);
+	if (ret) {
+		wpa_printf(MSG_ERROR, "set_ul_mu_cfg:Fail to put ulmu");
+		goto fail;
+	}
+
+	nla_nest_end(nlmsg, attr);
+
+	ret = send_nlmsg((struct nl_sock *)drv->global->nl, nlmsg, NULL, NULL);
+	if (ret)
+		wpa_printf(MSG_ERROR, "set_ul_mu_cfg: Error sending nlmsg");
+
+	return ret;
+fail:
+	nlmsg_free(nlmsg);
+	return ret;
+}
 
 int wpa_driver_nl80211_driver_cmd(void *priv, char *cmd, char *buf,
 				  size_t buf_len )
@@ -6410,7 +6461,7 @@ int wpa_driver_nl80211_driver_cmd(void *priv, char *cmd, char *buf,
 		ret = linux_get_ifhwaddr(drv->global->ioctl_sock, bss->ifname, macaddr);
 		if (!ret)
 			ret = os_snprintf(buf, buf_len,
-					  "Macaddr = " MACSTR "\n", MAC2STR(macaddr));
+					  "Macaddr = " MAC_ADDR_STR "\n", MAC_ADDR_ARRAY(macaddr));
 	} else if (os_strncasecmp(cmd, "SET_CONGESTION_REPORT ", 22) == 0) {
 		return wpa_driver_cmd_set_congestion_report(priv, cmd + 22);
 	} else if (os_strncasecmp(cmd, "SET_TXPOWER ", 12) == 0) {
@@ -6692,6 +6743,13 @@ int wpa_driver_nl80211_driver_cmd(void *priv, char *cmd, char *buf,
 		/* DRIVER SET_LISTEN_INTERVAL <listen_interval> */
 		cmd += 20;
 		return wpa_driver_cfg_listen_interval_cmd(bss, cmd);
+	} else if (os_strncasecmp(cmd, "SET_UL_MU_CONFIG ", 17) == 0) {
+		/* Usage: DRIVER SET_UL_MU_CONFIG <value>
+		 * value 0 - All UL_MU transmission are suspended by STA
+		 * value 1 - All UL_MU transmission are enabled by STA
+		 */
+		cmd += 17;
+		return wpa_driver_set_ul_mu_cfg(bss, cmd);
 	} else { /* Use private command */
 		memset(&ifr, 0, sizeof(ifr));
 		memset(&priv_cmd, 0, sizeof(priv_cmd));
